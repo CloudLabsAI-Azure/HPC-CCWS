@@ -539,6 +539,11 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+# Default CycleCloud VM values (after CLI parsing)
+CC_VM_NAME="${CC_VM_NAME:-ccw-cyclecloud-vm}"
+CC_VM_SKU="${CC_VM_SKU:-$SCHEDULER_SKU}"
+CYCLECLOUD_IMAGE="${CYCLECLOUD_IMAGE:-cycle.image.ubuntu24}"
+
 required=(SUBSCRIPTION_ID RESOURCE_GROUP LOCATION SSH_KEY_FILE ADMIN_PASSWORD)
 missing=()
 for var in "${required[@]}"; do
@@ -1258,33 +1263,160 @@ if [[ -z "${SLURM_VERSION}" || "${SLURM_VERSION}" == "null" ]]; then
 fi
 cat >"$OUTPUT_FILE" <<EOF
 {
-	"\$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentParameters.json#",
-	"contentVersion": "1.0.0.0",
-	"parameters": {
-		"location": { "value": "${LOCATION}" },
-		"adminUsername": { "value": "${ADMIN_USERNAME}" },
-		"adminSshPublicKey": { "value": "${SSH_PUBLIC_KEY}" },
-		"clusterName": { "value": "${CLUSTER_NAME}" },
-		"ccVMName": { "value": "ccw-cyclecloud-vm" },
-		"ccVMSize": { "value": "${SCHEDULER_SKU}" },
-		"resourceGroup": { "value": "${RESOURCE_GROUP}" },
-		"sharedFilesystem": { "value": { "type": "anf-new", "anfServiceTier": "${ANF_SKU}", "anfCapacityInTiB": ${ANF_SIZE}${ANF_ZONES_JSON} } },
-		${AMLFS_JSON}
-		"network": { "value": { "type": "new", "addressSpace": "${NETWORK_ADDRESS_SPACE}", "bastion": ${NETWORK_BASTION}, "createNatGateway": true } },
-		"storagePrivateDnsZone": { "value": { "type": "new" } },
-		${DB_JSON_DATABASE_CONFIG}
-		"acceptMarketplaceTerms": { "value": ${ACCEPT_MARKETPLACE} },
-		"slurmSettings": { "value": { "startCluster": ${SLURM_START_CLUSTER}, "version": "${SLURM_VERSION}", "healthCheckEnabled": false } },
-		"schedulerNode": { "value": { "sku": "${SCHEDULER_SKU}", "osImage": "${SCHEDULER_IMAGE}" } },
-		"loginNodes": { "value": { "sku": "${LOGIN_SKU}", "osImage": "${LOGIN_IMAGE}", "initialNodes": 1, "maxNodes": 1 } },
-		"htc": { "value": { "sku": "${HTC_SKU}", "maxNodes": ${HTC_MAX_NODES}, "osImage": "${HTC_IMAGE}", "useSpot": ${HTC_USE_SPOT}${HTC_ZONES_JSON} } },
-		"hpc": { "value": { "sku": "${HPC_SKU}", "maxNodes": ${HPC_MAX_NODES}, "osImage": "${HPC_IMAGE}"${HPC_ZONES_JSON} } },
-		"gpu": { "value": { "sku": "${GPU_SKU}", "maxNodes": ${GPU_MAX_NODES}, "osImage": "${GPU_IMAGE}"${GPU_ZONES_JSON} } },
-		${OOD_JSON}
-		${MONITORING_JSON}
-		${ENTRA_ID_JSON}
-		"tags": { "value": {} }
-	}
+  "\$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+
+    "location": {
+      "value": "${LOCATION}"
+    },
+
+    "infrastructureOnly": {
+      "value": false
+    },
+
+    "insidersBuild": {
+      "value": false
+    },
+
+    "branch": {
+      "value": "${WORKSPACE_REF}"
+    },
+
+    "projectVersion": {
+      "value": "${WORKSPACE_REF}"
+    },
+
+    "oodProjectVersion": {
+      "value": "${WORKSPACE_REF}"
+    },
+
+    "adminUsername": {
+      "value": "${ADMIN_USERNAME}"
+    },
+
+    "key": {
+      "value": {
+        "type": "entered",
+        "value": "${SSH_PUBLIC_KEY}"
+      }
+    },
+
+    "ccVMName": {
+      "value": "${CC_VM_NAME}"
+    },
+
+    "ccVMSize": {
+      "value": "${CC_VM_SKU}"
+    },
+
+    "resourceGroup": {
+      "value": "${RESOURCE_GROUP}"
+    },
+
+    "clusterName": {
+      "value": "${CLUSTER_NAME}"
+    },
+
+    "manualInstall": {
+      "value": false
+    },
+    "schedFilesystem": {
+      "value": {
+        "type": "nfs-new",
+	"nfsCapacityInGb": 100
+      }
+    },
+
+    "sharedFilesystem": {
+      "value": {
+        "type": "anf-new",
+        "anfServiceLevel": "${ANF_SKU}",
+        "anfCapacityInTiB": ${ANF_SIZE}${ANF_ZONES_JSON}
+      }
+    },
+
+${AMLFS_JSON}
+    "network": {
+      "value": {
+        "type": "new",
+        "addressSpace": "${NETWORK_ADDRESS_SPACE}",
+        "bastion": ${NETWORK_BASTION},
+        "createNatGateway": true
+      }
+    },
+
+    "storagePrivateDnsZone": {
+      "value": {
+        "type": "new"
+      }
+    },
+
+${DB_JSON_DATABASE_CONFIG}
+
+    "acceptMarketplaceTerms": {
+      "value": ${ACCEPT_MARKETPLACE}
+    },
+
+    "slurmSettings": {
+      "value": {
+        "startCluster": ${SLURM_START_CLUSTER},
+        "version": "${SLURM_VERSION}",
+        "healthCheckEnabled": false
+      }
+    },
+
+    "schedulerNode": {
+      "value": {
+        "sku": "${SCHEDULER_SKU}",
+        "osImage": "${SCHEDULER_IMAGE}"
+      }
+    },
+
+    "loginNodes": {
+      "value": {
+        "sku": "${LOGIN_SKU}",
+        "osImage": "${LOGIN_IMAGE}",
+        "initialNodes": 1,
+        "maxNodes": 1
+      }
+    },
+
+    "htc": {
+      "value": {
+        "sku": "${HTC_SKU}",
+        "maxNodes": ${HTC_MAX_NODES},
+        "osImage": "${HTC_IMAGE}",
+        "useSpot": ${HTC_USE_SPOT}${HTC_ZONES_JSON}
+      }
+    },
+
+    "hpc": {
+      "value": {
+        "sku": "${HPC_SKU}",
+        "maxNodes": ${HPC_MAX_NODES},
+        "osImage": "${HPC_IMAGE}"${HPC_ZONES_JSON}
+      }
+    },
+
+    "gpu": {
+      "value": {
+        "sku": "${GPU_SKU}",
+        "maxNodes": ${GPU_MAX_NODES},
+        "osImage": "${GPU_IMAGE}"${GPU_ZONES_JSON}
+      }
+    },
+
+${OOD_JSON}
+
+${MONITORING_JSON}
+
+${ENTRA_ID_JSON}
+
+    "tags": {
+      "value": {}
+    }
+  }
 }
 EOF
 
