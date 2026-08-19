@@ -1287,10 +1287,6 @@ cat >"$OUTPUT_FILE" <<EOF
       "value": "${WORKSPACE_REF}"
     },
 
-    "oodProjectVersion": {
-      "value": "${WORKSPACE_REF}"
-    },
-
     "adminUsername": {
       "value": "${ADMIN_USERNAME}"
     },
