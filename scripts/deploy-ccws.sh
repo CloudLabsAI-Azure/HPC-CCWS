@@ -560,6 +560,57 @@ if [[ ! -f "$SSH_KEY_FILE" ]]; then
 	exit 1
 fi
 SSH_PUBLIC_KEY="$(tr -d '\n' <"$SSH_KEY_FILE")"
+
+# Ensures all Azure resource providers required by CCW are Registered (idempotent).
+# Fresh subscriptions default to NotRegistered which causes ANF volume preflight failures.
+ensure_providers_registered() {
+	local providers=(
+		Microsoft.NetApp
+		Microsoft.Compute
+		Microsoft.Network
+		Microsoft.Storage
+		Microsoft.DBforMySQL
+		Microsoft.ManagedIdentity
+		Microsoft.Insights
+		Microsoft.KeyVault
+	)
+	if ! command -v az >/dev/null 2>&1; then
+		echo "[WARN] az CLI not available; skipping provider registration." >&2
+		return 0
+	fi
+	az account set --subscription "$SUBSCRIPTION_ID" 2>/dev/null || {
+		echo "[WARN] Unable to set subscription; provider registration skipped." >&2
+		return 0
+	}
+	echo "[INFO] Ensuring Azure resource providers are Registered in subscription $SUBSCRIPTION_ID ..." >&2
+	local p state
+	for p in "${providers[@]}"; do
+		state="$(az provider show --namespace "$p" --query "registrationState" -o tsv 2>/dev/null || echo "Unknown")"
+		if [[ "$state" != "Registered" ]]; then
+			echo "[INFO]  - $p is $state; triggering registration." >&2
+			az provider register --namespace "$p" --wait 2>/dev/null || \
+				az provider register --namespace "$p" >/dev/null 2>&1 || true
+		else
+			echo "[INFO]  - $p: Registered" >&2
+		fi
+	done
+	# Final wait loop (max ~10 min) for NetApp specifically since it's the frequent culprit
+	local waited=0
+	while (( waited < 600 )); do
+		state="$(az provider show --namespace Microsoft.NetApp --query "registrationState" -o tsv 2>/dev/null || echo "Unknown")"
+		if [[ "$state" == "Registered" ]]; then
+			echo "[INFO] Microsoft.NetApp: Registered" >&2
+			return 0
+		fi
+		echo "[INFO] Microsoft.NetApp still $state; waiting..." >&2
+		sleep 30
+		waited=$((waited + 30))
+	done
+	echo "[WARN] Microsoft.NetApp not Registered after 10 min; deployment may fail. Continuing anyway." >&2
+}
+
+ensure_providers_registered
+
 # Generate database name if requested
 if [[ "$DB_GENERATE_NAME" == "true" ]]; then
 	if [[ "$CREATE_ACCOUNTING_MYSQL" != "true" ]]; then
@@ -1532,6 +1583,64 @@ fi
 if [[ "$DO_DEPLOY" == "true" ]]; then
 	echo "[INFO] Reasserting Azure subscription context: $SUBSCRIPTION_ID"
 	az account set --subscription "$SUBSCRIPTION_ID" 2>/dev/null || echo "[WARN] Unable to set subscription (login required)."
+
+	# Removes any ANF resources left in 'Failed' state from a prior aborted deploy so preflight validation passes.
+	cleanup_failed_anf_resources() {
+		if ! az group show --name "$RESOURCE_GROUP" >/dev/null 2>&1; then
+			return 0
+		fi
+		local anf_accounts anf_acc pool_name vol_name pool_state vol_state
+		anf_accounts="$(az resource list -g "$RESOURCE_GROUP" --resource-type Microsoft.NetApp/netAppAccounts --query "[].name" -o tsv 2>/dev/null || true)"
+		[[ -z "$anf_accounts" ]] && return 0
+		while IFS= read -r anf_acc; do
+			[[ -z "$anf_acc" ]] && continue
+			local pools
+			pools="$(az netappfiles pool list -g "$RESOURCE_GROUP" --account-name "$anf_acc" --query "[].name" -o tsv 2>/dev/null || true)"
+			while IFS= read -r pool_name; do
+				[[ -z "$pool_name" ]] && continue
+				local vols
+				vols="$(az netappfiles volume list -g "$RESOURCE_GROUP" --account-name "$anf_acc" --pool-name "$pool_name" --query "[].name" -o tsv 2>/dev/null || true)"
+				while IFS= read -r vol_name; do
+					[[ -z "$vol_name" ]] && continue
+					vol_state="$(az netappfiles volume show -g "$RESOURCE_GROUP" --account-name "$anf_acc" --pool-name "$pool_name" --name "$vol_name" --query "provisioningState" -o tsv 2>/dev/null || echo "")"
+					if [[ "$vol_state" == "Failed" ]]; then
+						echo "[INFO] Removing Failed ANF volume: $anf_acc/$pool_name/$vol_name" >&2
+						local vol_id="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.NetApp/netAppAccounts/$anf_acc/capacityPools/$pool_name/volumes/$vol_name"
+						az resource delete --ids "$vol_id" >/dev/null 2>&1 || true
+						sleep 30
+					fi
+				done <<<"$vols"
+				pool_state="$(az netappfiles pool show -g "$RESOURCE_GROUP" --account-name "$anf_acc" --name "$pool_name" --query "provisioningState" -o tsv 2>/dev/null || echo "")"
+				if [[ "$pool_state" == "Failed" ]]; then
+					echo "[INFO] Removing Failed ANF pool: $anf_acc/$pool_name" >&2
+					az netappfiles pool delete -g "$RESOURCE_GROUP" --account-name "$anf_acc" --name "$pool_name" --yes >/dev/null 2>&1 || true
+					sleep 30
+				fi
+			done <<<"$pools"
+		done <<<"$anf_accounts"
+	}
+
+	# Deletes Failed deployment records that block re-run preflight of the same names.
+	cleanup_failed_deployments() {
+		if ! az group show --name "$RESOURCE_GROUP" >/dev/null 2>&1; then
+			return 0
+		fi
+		local failed
+		failed="$(az deployment group list -g "$RESOURCE_GROUP" --query "[?properties.provisioningState=='Failed'].name" -o tsv 2>/dev/null || true)"
+		if [[ -n "$failed" ]]; then
+			while IFS= read -r dep; do
+				[[ -z "$dep" ]] && continue
+				echo "[INFO] Removing Failed deployment record: $dep" >&2
+				az deployment group delete -g "$RESOURCE_GROUP" -n "$dep" >/dev/null 2>&1 || true
+			done <<<"$failed"
+		fi
+	}
+
+	echo "[INFO] Pre-deploy sanity: cleaning up any Failed ANF resources from prior aborted runs..."
+	cleanup_failed_anf_resources
+	echo "[INFO] Pre-deploy sanity: cleaning up any Failed deployment records..."
+	cleanup_failed_deployments
+
 	echo "[INFO] Performing az deployment sub create"
 	if [[ "$DB_ENABLED" == "true" ]]; then
 		az deployment sub create --name "$RANDOM_NAME" --location "$LOCATION" --template-file "$WORKSPACE_DIR/bicep/mainTemplate.bicep" --parameters @"$OUTPUT_FILE" adminPassword="$ADMIN_PASSWORD" databaseAdminPassword="$DB_PASSWORD" --debug || {
